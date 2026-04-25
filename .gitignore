@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+faiss_index/
+processed_docs.pkl
+HTL_files/
+ML_AI_files/
