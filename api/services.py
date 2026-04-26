@@ -1,15 +1,24 @@
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.chat_models import ChatOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain_community.chat_models import ChatOllama
+from typer.cli import docs
+from langchain_huggingface import HuggingFaceEmbeddings
 
 # carregar tudo uma vez (evita custo por request)
-embeddings = OpenAIEmbeddings()
-vectorstore = FAISS.load_local("faiss_index", embeddings)
+embeddings = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+vectorstore = FAISS.load_local(
+    "faiss_index", 
+    embeddings,
+    allow_dangerous_deserialization=True)
 
 retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
 
-llm = ChatOpenAI(temperature=0)
-
+llm = ChatOllama(
+    model="llama3",   # ou llama3, dependendo do que você baixou
+    temperature=0
+)
 
 def split_docs(docs):
     ml_docs = [d for d in docs if d.metadata["source"] == "pdf_machine_learning"]
@@ -30,19 +39,26 @@ def build_context(ml_docs, htl_docs):
     """
 
 
-def answer_question(question: str) -> str:
-    docs = retriever.get_relevant_documents(question)
+def answer_question(question: str, mode="tecnico-didatico") -> str:
+    docs = retriever.invoke(question)
 
     ml_docs, htl_docs = split_docs(docs)
-    context = build_context(ml_docs, htl_docs)
+    context = build_context(ml_docs[:5], htl_docs[:2])
 
     prompt = f"""
-    Você é um assistente de aprendizado.
+    Você é um tutor especialista em Machine Learning.
 
-    Regras:
-    - Use o conteúdo técnico para explicar conceitos
-    - Use a estratégia didática para ensinar de forma clara
-    - Combine os dois de forma objetiva
+    OBJETIVO:
+    Ensinar de forma clara e didática usando o contexto fornecido.
+
+    REGRAS:
+    - Foque na clareza e didática, não apenas na precisão técnica
+    - Explique como se fosse para alguém aprendendo
+    - Priorize o conteúdo técnico, mas use a estratégia didática para guiar a resposta
+    - Faça analogias e exemplos para facilitar o entendimento
+    - Estimule o pensamento crítico fazendo perguntas de acompanhamento
+    - Use exemplos quando possível
+    - NÃO invente conteúdo fora do contexto
 
     Pergunta: {question}
 
@@ -50,5 +66,8 @@ def answer_question(question: str) -> str:
     {context}
     """
 
-    response = llm.predict(prompt)
-    return response
+    print(f"\nPergunta: {question}")
+    print(f"Docs retornados: {len(docs)}")
+
+    response = llm.invoke(prompt)
+    return response.content

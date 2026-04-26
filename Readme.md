@@ -1,297 +1,232 @@
-# Enrichment Pipeline Documentation
+# AI Personal Agent Documentation
 
 ## Sumário
 
-- [Objetivo](#objetivo)
-- [Visão geral do pipeline](#visão-geral-do-pipeline)
-- [Por que enriquecimento é importante?](#por-que-enriquecimento-é-importante)
-- [O que o código faz](#o-que-o-código-faz)
-- [Estrutura do código e comentários](#estrutura-do-código-e-comentários)
-- [Por que separar didático e conteúdo no metadata?](#por-que-separar-didático-e-conteúdo-no-metadata)
-- [Como usar isso depois na recuperação](#como-usar-isso-depois-na-recuperação)
-- [Por que essa abordagem é melhor?](#por-que-essa-abordagem-é-melhor)
-- [Dependências e execução](#dependências-e-execução)
-- [Aviso sobre tamanho de dados](#aviso-sobre-tamanho-de-dados)
-- [Resumo final](#resumo-final)
+- [Visão geral](#visão-geral)
+- [Objetivo do projeto](#objetivo-do-projeto)
+- [Arquitetura e componentes](#arquitetura-e-componentes)
+- [Fluxo de dados](#fluxo-de-dados)
+- [Como rodar o projeto](#como-rodar-o-projeto)
+- [API](#api)
+- [Dependências](#dependências)
+- [Estrutura de arquivos](#estrutura-de-arquivos)
+- [Observações importantes](#observações-importantes)
+- [Limitações](#limitações)
+- [O que foi atualizado](#o-que-foi-atualizado)
 
-## Objetivo
+## Visão geral
 
-Este documento explica detalhadamente o que o script `code.py` faz e por quê.
-O foco é transformar PDFs em documentos enriquecidos para uso em embeddings, busca semântica e RAG.
+Este projeto é um assistente de aprendizado baseado em Inteligência Artificial que:
 
-## Visão geral do pipeline
+- lê PDFs de duas pastas separadas (`ML-AI-Files` e `HTL-Files`)
+- limpa e enriquece o texto com Spark
+- transforma o conteúdo em documentos LangChain
+- cria um índice de similaridade FAISS
+- expõe uma API FastAPI para responder perguntas usando um modelo de linguagem local
 
-O fluxo principal é:
+## Objetivo do projeto
 
-1. Carregar PDFs de pastas locais com `PyPDFLoader`
-2. Transformar as páginas em registros estruturados
-3. Limpar o texto com Spark
-4. Enriquecer o texto com contexto adicional
-5. Manter metadata separada para filtros e lógica de agente
-6. Converter tudo em `Document` do LangChain
-7. Divide os documentos em chunks para melhorar a recuperação
+Construir um pipeline completo de RAG (retrieval-augmented generation) para:
 
-## Por que enriquecimento é importante?
+- separar conteúdo técnico de conteúdo pedagógico
+- enriquecer o texto com metadata útil
+- permitir respostas mais didáticas e contextualizadas
+- servir um endpoint de pergunta/resposta via FastAPI
 
-Embeddings não entendem por si só:
-- de onde veio o texto
-- qual o tipo de documento
-- contexto implícito
+## Arquitetura e componentes
 
-Por isso, precisamos injetar manualmente essas informações.
+### `data_pipeline.py`
 
-### Dois lugares para enriquecimento
+Responsável por:
 
-1) Dentro do texto (`page_content`)
+- carregar PDFs de `./files/ML-AI-Files` e `./files/HTL-Files`
+- criar registros por página usando `PyPDFLoader`
+- aplicar limpeza e enriquecimento via Spark
+- gerar `Document` do LangChain com metadata
+- dividir cada documento em chunks de 1000 caracteres com 200 de overlap
+- salvar `processed_docs.pkl`
 
-Exemplo:
+Dados extraídos por página incluem:
 
-```text
-pdf_machine_learning | Página: 3 | o modelo apresentou overfitting
-```
+- `source`: `pdf_machine_learning` ou `pdf_htl`
+- `content_type`: tipo de conteúdo
+- `file_name`: nome do arquivo PDF
+- `page`: número da página
 
-Isso influencia:
-- embeddings
-- busca semântica
+O texto processado também é enriquecido com:
 
-2) Dentro do metadata
+- nome da fonte
+- número da página
 
-Exemplo:
+### `indexing.py`
 
-```python
-metadata = {
-    "source": "pdf_machine_learning"
-}
-```
+Responsável por:
 
-Isso influencia:
-- filtros
-- lógica do agente
-- organização
+- carregar `processed_docs.pkl`
+- gerar embeddings usando `HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")`
+- construir um índice FAISS com `FAISS.from_documents`
+- salvar o índice local em `faiss_index`
 
-## O que o código faz
+### `api/main.py`
 
-### 1) Carregar os PDFs
+Define a API FastAPI do projeto:
 
-O código procura arquivos PDF nas pastas configuradas:
-- `./files/ML-AI-Files`
-- `./files/HTL-Files`
+- `GET /`: health check simples
+- `POST /ask`: recebe pergunta e retorna resposta do agente
 
-Cada PDF é carregado com `PyPDFLoader` e transformado em registros por página com metadados:
-- `source` (como `pdf_machine_learning` ou `pdf_htl`)
-- `content_type` (por exemplo `material_estudo`)
-- `file_name`
-- `page`
+### `api/schemas.py`
 
-Isso dá um registro estruturado para cada página do PDF.
+Define os modelos Pydantic usados pela API:
 
-### 2) Limpeza de texto com Spark
+- `QuestionRequest` com campo `question`
+- `AnswerResponse` com campo `answer`
 
-O texto de cada página passa por várias transformações:
-- remove quebras de linha repetidas (`\n+`)
-- remove hifenização de palavras quebradas (`-\s+`)
-- normaliza espaços (`\s+`)
-- converte para minúsculas
-- remove rodapés como `Page 1`
-- remove textos curtos com menos de 80 caracteres
+### `api/services.py`
 
-Essas etapas deixam o texto mais limpo e melhoram a qualidade dos embeddings.
+Define a lógica de resposta:
 
-### 3) Enriquecimento dentro do texto
+- carrega o índice FAISS local com `allow_dangerous_deserialization=True`
+- configura embeddings e retriever
+- usa `ChatOllama(model="llama3", temperature=0)` como LLM
+- separa documentos retornados por metadata de source
+- monta contexto técnico e didático
+- gera o prompt de pergunta com regras didáticas
+- retorna a resposta do modelo
 
-Depois da limpeza, o script adiciona informação no próprio campo de texto:
+### `retrievel.py`
 
-- `source` (por exemplo `pdf_machine_learning`)
-- `Página: N`
+Tem um loader auxiliar para:
 
-Isso garante que os embeddings carreguem o contexto de origem e a posição do conteúdo.
+- carregar o mesmo `faiss_index`
+- criar um retriever com `k=3`
 
-### 4) Enriquecimento em metadata
+Esse arquivo funciona como um helper de recuperação e validação independente da API.
 
-Além disso, cada documento mantém metadata separada:
+## Fluxo de dados
 
-```python
-metadata={
-    "source": record["source"],
-    "content_type": record["content_type"],
-    "file_name": record["file_name"],
-    "page": record.get("page"),
-}
-```
+1. `data_pipeline.py` processa PDFs em `processed_docs.pkl`
+2. `indexing.py` gera `faiss_index/` a partir de `processed_docs.pkl`
+3. `api/services.py` carrega `faiss_index/` e cria um retriever
+4. `api/main.py` expõe `/ask` para responder perguntas
 
-Isso permite uso posterior em filtros, agrupamentos, decisão de agente e montagem de prompt.
+## Como rodar o projeto
 
-## Estrutura do código e comentários
-
-O código está dividido em seções claras com comentários explicativos:
-
-- **Imports e visão geral**: Explica o pipeline em alto nível e os dois tipos de enriquecimento.
-- **Funções auxiliares**: `list_pdf_files` e `load_pdf_records` com docstrings.
-- **Configuração**: Pastas de entrada e labels de source.
-- **Carregamento**: Loop para carregar PDFs e criar registros.
-- **Pipeline Spark**: Limpeza e enriquecimento do texto.
-- **Conversão para LangChain**: Criação de objetos `Document` com metadata separada.
-- **Chunking**: Divisão em chunks para melhor recuperação.
-
-Comentários adicionados incluem:
-- Explicação de por que Spark é usado para limpeza.
-- Detalhes sobre cada transformação de texto.
-- Motivo para manter metadata separada.
-- Aviso sobre coleta de dados em memória.
-
-## Por que separar didático e conteúdo no metadata?
-
-A pergunta chave é:
-
-> "Eu não deveria separar o que é didático e o que é conteúdo?"
-
-Resposta:
-
-- Sim, você deve separar isso
-- Mas NÃO no próprio texto enriquecido
-
-Você já está fazendo certo ao diferenciar `source` no metadata:
-- `pdf_htl` vs `pdf_machine_learning`
-
-Se você tentar pré-classificar demais no texto, perde flexibilidade.
-
-## Como usar isso depois na recuperação
-
-O caminho ideal é:
-
-1) Buscar documentos relevantes
-
-```python
-docs = retriever.get_relevant_documents(pergunta)
-```
-
-2) Separar por tipo usando metadata
-
-```python
-ml_docs = [d for d in docs if d.metadata["source"] == "pdf_machine_learning"]
-htl_docs = [d for d in docs if d.metadata["source"] == "pdf_htl"]
-```
-
-3) Montar contexto estruturado
-
-```text
-CONTEÚDO TÉCNICO:
-... (texto do ml_docs)
-
-FORMA DE ENSINAR:
-... (texto do htl_docs)
-```
-
-4) Enviar ao modelo com instrução
-
-```python
-prompt = f"Use esse contexto para responder...
-
-{conteudo_tecnico}
-
-{forma_de_ensinar}"
-```
-
-### Exemplo completo de uso
-
-Aqui está um exemplo mais completo de como integrar isso em um sistema RAG:
-
-```python
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OpenAIEmbeddings
-
-# Assumindo que 'chunked_documents' foi criado pelo script
-embeddings = OpenAIEmbeddings()
-vectorstore = FAISS.from_documents(chunked_documents, embeddings)
-retriever = vectorstore.as_retriever()
-
-# Busca por uma pergunta
-pergunta = "Como ensinar machine learning?"
-docs = retriever.get_relevant_documents(pergunta)
-
-# Separa por source
-ml_docs = [d for d in docs if d.metadata["source"] == "pdf_machine_learning"]
-htl_docs = [d for d in docs if d.metadata["source"] == "pdf_htl"]
-
-# Monta contexto
-conteudo_tecnico = "\n".join([d.page_content for d in ml_docs])
-forma_de_ensinar = "\n".join([d.page_content for d in htl_docs])
-
-# Cria prompt estruturado
-prompt = f"""
-Use o contexto abaixo para responder à pergunta: {pergunta}
-
-CONTEÚDO TÉCNICO:
-{conteudo_tecnico}
-
-FORMA DE ENSINAR:
-{forma_de_ensinar}
-
-Resposta:
-"""
-
-# Envia para o modelo (exemplo com OpenAI)
-from langchain.llms import OpenAI
-llm = OpenAI()
-resposta = llm(prompt)
-```
-
-## Por que essa abordagem é melhor?
-
-Se você decide o papel de cada documento antes da busca:
-- perde flexibilidade
-- limita a combinação de informações
-- piora a recuperação
-
-Se você decide isso após a busca:
-- mantém controle total
-- consegue montar respostas mais precisas
-- constrói um sistema mais inteligente
-
-## Dependências e execução
-
-### Dependências
-
-Para executar o script, você precisa:
-
-- Python 3.8+
-- PySpark
-- LangChain
-- PyPDFLoader (parte do LangChain)
-
-Instale com:
+1. Instale as dependências:
 
 ```bash
-pip install pyspark langchain pypdf
+pip install -r requirements.txt
 ```
 
-### Como executar
-
-1. Coloque seus PDFs nas pastas `./files/ML-AI-Files` e `./files/HTL-Files`
-2. Execute o script:
+2. Gere os documentos processados:
 
 ```bash
-python code.py
+python data_pipeline.py
 ```
 
-O script irá imprimir o número de documentos carregados.
+3. Crie o índice FAISS:
 
-## Aviso sobre tamanho de dados
-
-O script converte o DataFrame Spark em `pandas`:
-
-```python
-df.toPandas()
+```bash
+python indexing.py
 ```
 
-Isso funciona bem para conjuntos de dados moderados.
-Se o dataset for gigante, você precisará de uma solução distribuída ou outra estratégia de processamento.
+4. Inicie a API:
+
+```bash
+uvicorn api.main:app --reload
+```
+
+5. Envie uma pergunta:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/ask"   -H "Content-Type: application/json"   -d '{"question":"Explique o que é machine learning."}'
+```
+
+## API
+
+### `GET /`
+
+Retorna um health check:
+
+```json
+{ "status": "ok" }
+```
+
+### `POST /ask`
+
+Entrada JSON:
+
+```json
+{ "question": "..." }
+```
+
+Resposta JSON:
+
+```json
+{ "answer": "..." }
+```
+
+## Dependências
+
+O arquivo `requirements.txt` já lista as dependências do projeto. As principais são:
+
+- `fastapi`
+- `uvicorn`
+- `pyspark`
+- `langchain`
+- `langchain-community`
+- `langchain-huggingface`
+- `langchain-classic`
+- `sentence-transformers`
+- `faiss-cpu`
+
+## Estrutura de arquivos
+
+- `data_pipeline.py` — pipeline de ingestão, limpeza e chunking de PDFs
+- `indexing.py` — criação do índice FAISS
+- `api/main.py` — aplicação FastAPI
+- `api/schemas.py` — modelos de request/response Pydantic
+- `api/services.py` — lógica de resposta e prompt do modelo
+- `retrievel.py` — helper para carregar o índice e criar retriever
+- `requirements.txt` — dependências do projeto
+- `files/ML-AI-Files/` — PDFs de Machine Learning e AI
+- `files/HTL-Files/` — PDFs de conteúdo pedagógico
+- `faiss_index/` — índice FAISS salvo localmente
+- `processed_docs.pkl` — documentos processados e chunkificados
+
+## Observações importantes
+
+- O projeto atual não usa `langchain_openai`.
+- A integração atual utiliza `langchain-huggingface`, `langchain-community` e `ChatOllama`.
+- `api/services.py` assume que um modelo compatível com `ChatOllama(model="llama3")` está disponível no ambiente.
+- `FAISS.load_local` no serviço usa `allow_dangerous_deserialization=True` para carregar o índice salvo.
+- `answer_question` usa `retriever.invoke(question)` em vez de `get_relevant_documents`.
+
+## Limitações
+
+- O pipeline converte o DataFrame Spark para pandas em memória.
+- O `data_pipeline.py` falha se não houver PDFs válidos nas pastas de entrada.
+- A API depende da existência do diretório `faiss_index/`.
+- A montagem de prompt e contexto está codificada em `api/services.py`.
+- O modelo local deve suportar `ChatOllama` e o nome do modelo `llama3`.
+
+## O que foi atualizado
+
+Este README agora documenta corretamente:
+
+- o uso real de `data_pipeline.py`, `indexing.py`, `api/main.py`, `api/schemas.py`, `api/services.py` e `retrievel.py`
+- o fluxo de geração de `processed_docs.pkl` e `faiss_index/`
+- os metadados extraídos e o enriquecimento do texto
+- a separação entre conteúdo técnico (`pdf_machine_learning`) e didático (`pdf_htl`)
+- as dependências presentes em `requirements.txt`
+- a API FastAPI e seus endpoints
 
 ## Resumo final
 
-- O enriquecimento é feito em dois lugares: texto e metadata
-- Texto enriquecido ajuda embeddings e busca semântica
-- Metadata separada ajuda filtros e lógica de agente
-- A decisão sobre "didático vs conteúdo" deve ficar para depois da busca, não no dado bruto
-- O pipeline atual segue essa ideia de forma clara e pedagógica
+O projeto é uma solução de RAG voltada para perguntas sobre conteúdo técnico e pedagógico.
+Ele combina:
 
+- extração de PDFs
+- limpeza de texto com Spark
+- chunking de conteúdo
+- indexação com FAISS
+- respostas com um modelo de linguagem local via FastAPI

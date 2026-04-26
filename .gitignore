@@ -3,5 +3,5 @@ __pycache__/
 .env
 faiss_index/
 processed_docs.pkl
-HTL_files/
-ML_AI_files/
+files/HTL-Files/
+files/ML-AI-Files/
