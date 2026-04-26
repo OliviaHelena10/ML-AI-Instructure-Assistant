@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from api.schemas import QuestionRequest, AnswerResponse
 from api.services import answer_question
 
-app = FastAPI(title="AI Learning Assistant API")
+app = FastAPI(title="AI/ML Teaching Assistant", version="1.0")
 
 
 @app.get("/")
